@@ -1,0 +1,29 @@
+Package: dlglm
+Type: Package
+Title: Deeply-learned Generalized Linear Model
+Version: 0.1.0
+Authors@R: 
+    person(given = "David",
+           family = "Lim",
+           role = c("aut", "cre"),
+           email = "deelim@live.unc.edu",
+           comment = c(ORCID = "https://orcid.org/0000-0001-6403-4849"))
+Description: Unify statisticaly theory and deep learning methods to properly perform supervised learning in the presence of missing not at random (MNAR) data using deeply-learned importance weighted autoencoders.
+Config/reticulate:
+  list(
+    packages = list(
+      list(package = "torch", version = "1.5.0", pip = TRUE)
+	  list(package = "numpy", version = "1.18.1", pip = TRUE)
+	  list(package = "pandas", version = "1.0.1", pip = TRUE)
+	  list(package = "scipy", version = "1.4.1", pip = TRUE)
+    )
+  )
+License: GPL-3
+Encoding: UTF-8
+LazyData: true
+RoxygenNote: 7.1.1
+Imports: MASS, qrnn, reticulate, nnet, pROC, measures, grid, gridExtra, gtable, mclust, mice, ggplot2
+Author: David Lim [aut, cre] (<https://orcid.org/0000-0001-6403-4849>)
+Maintainer: David Lim <deelim@live.unc.edu>
+URL: https://github.com/DavidKLim/dlglm
+BugReports: https://github.com/DavidKLim/dlglm/issues

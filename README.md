@@ -1,5 +1,5 @@
 # dlglm
-Package for Deep Learning Generalized Linear Model (dlglm). Uses reticulated Python to run deep learning models through R. 
+Package for Deeply-Learned Generalized Linear Model (dlglm). Uses reticulated Python to run deep learning models through R. 
 
 ## Installation
 In order to install the released version of the `dlglm` R package, it is important to correctly install Python, and the required Python modules. The package was tested and developed using Python3, and the versions of the Python modules listed below. `dlglm` may work with a different version of Python and/or different versions of the listed modules, but may yield unexpected results. Below is a guide on how to replicate the tested installation of `dlglm` from scratch. Disclaimer: in order to run `dlglm`, you will need a CUDA-enabled graphics card. Please ensure that you have a CUDA-enabled GPU on your system, and check the version of CUDA that is supported by your GPU card before your installation!
