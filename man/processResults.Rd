@@ -19,7 +19,8 @@ processResults(
   data_type_y = "real",
   family = "Gaussian",
   methods = c("idlglm", "dlglm", "mice", "zero", "mean"),
-  init_r = "default"
+  init_r = "default",
+  normalize = F
 )
 }
 \arguments{

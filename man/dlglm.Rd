@@ -11,24 +11,25 @@ dlglm(
   mask_x,
   mask_y,
   g,
-  covars_r_x = rep(1, ncol(X)),
-  covars_r_y = 1,
+  covars_r_x,
+  covars_r_y,
   learn_r,
   data_types_x,
-  Ignorable = F,
+  Ignorable,
   family,
   link,
-  normalize = F,
-  early_stop = T,
-  trace = F,
+  normalize,
+  early_stop,
+  trace,
   draw_miss = T,
   init_r = "default",
   unbalanced = F,
   hyperparams = list(sigma = "elu", bss = c(1000L), lrs = c(0.01, 0.001), impute_bs =
     1000L, arch = "IWAE", niws = 5L, n_imps = 500L, n_epochss = 2002L, n_hidden_layers =
-    c(1L, 2L, 4L), n_hidden_layers_y = c(0L, 1L, 2L), n_hidden_layers_r = c(0L, 1L), h =
-    c(128L, 64L), h_y = NULL, h_r = c(16L, 32L), dim_zs = as.integer(floor(c(8L,
-    ncol(X)/4, ncol(X)/2, 3 * ncol(X)/4))), L1_weights = 0)
+    c(0L, 1L, 2L), n_hidden_layers_y = c(0L), n_hidden_layers_r = c(0L, 1L), h = c(128L,
+    64L), h_y = NULL, h_r = c(16L, 32L), dim_zs = c(as.integer(floor(ncol(X)/12)),
+    as.integer(floor(ncol(X)/4)), as.integer(floor(ncol(X)/2)), as.integer(floor(3 *
+    ncol(X)/4))), L1_weights = 0)
 )
 }
 \arguments{

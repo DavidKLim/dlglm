@@ -18,12 +18,13 @@
 #' @importFrom reticulate import
 #' @importFrom nnet multinom
 #' @importFrom pROC auc
-#' @importFrom measures Brier
+#' @importFrom measures Brier KAPPA F1 FPR TPR PPV
 #' @importFrom gridExtra tableGrob
 #' @importFrom grid textGrob grobHeight
 #' @importFrom gtable gtable_add_rows gtable_add_grob
 #' @importFrom mclust adjustedRandIndex
 #' @importFrom mice complete
+#' @importFrom yardstick mcc_vec
 #' @import ggplot2
 #'
 #' @export
@@ -32,9 +33,9 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
                           sim.params = list(N=1e5, D=2, P=8, family="Gaussian", sim_index=1, ratios=c(train=.6,valid=.2,test=.2),
                                             mu=0, sd=1, beta=5, C=3, Cy=NULL, NL_x=F, NL_y=F),
                           miss.params = list(scheme="UV", mechanism="MNAR", pi=0.5, phi0=5, miss_pct_features=50, miss_cols=NULL, ref_cols=NULL, NL_r=F),
-                          case=c("x","y","xy"), data_types_x, data_type_y = "real", family="Gaussian", methods=c("idlglm","dlglm","mice","zero","mean"), init_r="default"){
-
-  torch = reticulate::import("torch")
+                          case=c("x","y","xy"), data_types_x, data_type_y = "real", family="Gaussian", methods=c("idlglm","dlglm","mice","zero","mean"), init_r="default", normalize=F){
+  inorm = if(normalize){"with_normalization/"}else{""}
+  torch = import("torch")
 
   if(init_r=="default"){dlglm_pref = ""} else if(init_r=="alt"){dlglm_pref = "/alt_init"}
 
@@ -61,13 +62,13 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
   mechanism=miss.params$mechanism
   sim_index=sim.params$sim_index
 
-  iNL_r = if(NL_r){"NL_"}else{""}
-
+  iNL_r=""
   if(grepl("SIM",dataset)){
     iNL_x = if(NL_x){"NL"}else{""}
     iNL_y = if(NL_y){"NL"}else{""}
-    dir_name0 = sprintf("Results_%sX%s_%sY%s/%s%s/miss_%s%s/phi%d/sim%d",
-                        iNL_x,data_type_x,iNL_y,data_type_y,prefix, dataset, iNL_r, case, miss.params$phi0, sim_index)
+    data_type_x = if(all(data_types_x==data_types_x[1])){data_types_x[1]}else{"mixed"}
+
+    dir_name0 = sprintf("Results_%sX%s_%sY%s/%s%s/miss_%s%s/phi%d/sim%d", iNL_x,data_type_x,iNL_y,data_type_y,prefix, dataset, iNL_r, case, miss.params$phi0, sim_index)
     dir_name=sprintf("%s%s",dir_name0,dlglm_pref)
   } else{
     dir_name0 = sprintf("Results_%s%s/miss_%s%s/phi%d/sim%d", prefix,dataset, iNL_r, case, miss.params$phi0, sim_index)
@@ -88,7 +89,7 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
   }
 
   N=nrow(X); P=ncol(X)
-  if(!grepl("SIM",dataset) & family=="Multinomial"){ Y = as.numeric(as.factor(Y)) }  # sometimes the cat vars are nonnumeric for UCI
+  if(!grepl("SIM",dataset) & family=="Multinomial"){ levels_Y = levels(factor(Y)); Y = as.numeric(as.factor(Y)) }  # sometimes the cat vars are nonnumeric for UCI
 
   data_types_x_0 = data_types_x
   # mask_x = (res$mask_x)^2; mask_y = (res$mask_y)^2
@@ -128,7 +129,24 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
   Rxs = split(data.frame(mask_x), g)
   Rys = split(data.frame(mask_y), g)
 
-  # normalization is undone in the dlglm function
+  Cy = length(unique(Ys$test$Y))
+  if(normalize){
+    norm_means_x=colMeans(Xs$train, na.rm=T); norm_sds_x=apply(Xs$train,2,function(y) sd(y,na.rm=T))
+    norm_mean_y=0; norm_sd_y=1
+    norm_means_x[data_types_x=="cat"] = 0; norm_sds_x[data_types_x=="cat"] = 1
+    # if(family=="Multinomial"){
+    #   norm_mean_y=0; norm_sd_y=1
+    # } else{
+    #   norm_mean_y=colMeans(Ys$train, na.rm=T); norm_sd_y=apply(Ys$train,2,function(y) sd(y,na.rm=T))
+    # }
+    # dir_name = sprintf("%s/with_normalization",dir_name)
+    # ifelse(!dir.exists(dir_name),dir.create(dir_name),F)
+  }else{
+    P_aug = ncol(Xs$train)
+    norm_means_x = rep(0, P_aug); norm_sds_x = rep(1, P_aug)
+    norm_mean_y = 0; norm_sd_y = 1
+  }
+  ## didn't normalize
   # norm_means_x=colMeans(Xs$train, na.rm=T); norm_sds_x=apply(Xs$train,2,function(y) sd(y,na.rm=T))   # normalization already undone in results xhat
   # # norm_mean_y=colMeans(Ys$train, na.rm=T); norm_sd_y=apply(Ys$train,2,function(y) sd(y,na.rm=T))
   # norm_mean_y=0; norm_sd_y=1   # didn't normalize Y
@@ -141,7 +159,7 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
   yhats2 = matrix(ncol=0,nrow=nrow(Ys$test))
   prhats = list()
   prhats2 = list()    # with missingness in test set (preimpute separately for mean/zero/mice, dlglm can take it in and sample from posterior)
-
+  prhats_train = list()
 
   if(family=="Multinomial"){ link = "mlogit"
   } else if(family=="Gaussian"){ link = "identity"
@@ -178,15 +196,26 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
     if(family=="Multinomial"){
       prhat_zero_pred = predict(fit_zero, newdata=cbind(Xs$test,Ys$test,row.names = NULL), type="probs")
       prhat_zero_pred2 = predict(fit_zero, newdata=cbind(Xs_zero$test,Ys$test,row.names = NULL), type="probs")
+      # if(Cy==2){
+      #   prhats$"zero" = matrix(nrow=length(prhat_zero_pred),ncol=2); prhats$"zero"[,2] = prhat_zero_pred; prhats$"zero"[,1] = 1-prhats$"zero"[,2]
+      #   prhats2$"zero" = matrix(nrow=length(prhat_zero_pred2),ncol=2); prhats2$"zero"[,2] = prhat_zero_pred2; prhats2$"zero"[,1] = 1-prhats2$"zero"[,2]
+      # }else{
+      #   prhats$"zero" = prhat_zero_pred
+      #   prhats2$"zero" = prhat_zero_pred2
+      # }
       prhats$"zero" = prhat_zero_pred
       prhats2$"zero" = prhat_zero_pred2
+      prhats_train$"zero" = predict(fit_zero, newdata=cbind(Xs_zero$train,Ys$train,row.names = NULL), type="probs")
     }
     xhats$"zero" = xhat_zero
 
     tab = cbind(tab,w_zero); colnames(tab)[ncol(tab)] = "zero"
+    rm(X_zero); rm(Y_zero)
+    rm(Xs_zero); rm(Ys_zero)
   }
   ## created: Xs_zero (Y), yhats$zero (complete test), yhats2$zero (imputed test)
   ## prhats$zero, prhats2$zero (complete/imputed test prob of Y), xhats$zero (just test set of Xs_zero)
+  gc()
   if("mean" %in% methods){
     X_mean = X; Y_mean = Y
     for(i in 1:ncol(X_mean)){
@@ -211,28 +240,42 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
     if(family=="Multinomial"){
       prhat_mean_pred = predict(fit_mean, newdata=cbind(Xs$test,Ys$test,row.names = NULL), type="probs")
       prhat_mean_pred2 = predict(fit_mean, newdata=cbind(Xs_mean$test,Ys$test,row.names = NULL), type="probs")
+      # if(Cy==2){
+      #   prhats$"mean" = matrix(nrow=length(prhat_mean_pred),ncol=2); prhats$"mean"[,2] = prhat_mean_pred; prhats$"mean"[,1] = 1-prhats$"mean"[,2]
+      #   prhats2$"mean" = matrix(nrow=length(prhat_mean_pred2),ncol=2); prhats2$"mean"[,2] = prhat_mean_pred2; prhats2$"mean"[,1] = 1-prhats2$"mean"[,2]
+      # }else{
+      #   prhats$"mean" = prhat_mean_pred
+      #   prhats2$"mean" = prhat_mean_pred2
+      # }
       prhats$"mean" = prhat_mean_pred
       prhats2$"mean" = prhat_mean_pred2
+      prhats_train$"mean" = predict(fit_mean, newdata=cbind(Xs_mean$train,Ys$train,row.names = NULL), type="probs")
+
     }
     xhats$"mean" = xhat_mean
 
     tab = cbind(tab,w_mean); colnames(tab)[ncol(tab)] = "mean"
-
+    rm(X_mean); rm(Y_mean)
+    rm(Xs_mean); rm(Ys_mean)
   }
-
+  gc()
   ## for idlglm, dlglm, mice --> load saved results
   if("dlglm" %in% methods){
     fname = sprintf("%s/res_dlglm_%s_%d_%d.RData",dir_name,mechanism,miss_pct_features,pi*100)
     print(paste("dlglm Results file: ", fname))
-    if(!file.exists(fname)){ return() }
+    if(!file.exists(fname)){ break }
     load( fname )  # loads "X","Y","mask_x","mask_y","g"
     # should contain "res", which is a list that contains "results" and "fixed.params" from now on. First iteration only contains res (no list) results object
     res = res$results
     niws = res$train_params$niws_z
 
-    saved_model = torch$load(sprintf("%s/%s_%d_%d/opt_train_saved_model.pth",dir_name, mechanism, miss.params$miss_pct_features, pi*100))
+    print("Loading saved model")
+    saved_model = torch$load(sprintf("%s/%s_%d_%d/%sopt_train_saved_model.pth",
+                                     dir_name, mechanism, miss.params$miss_pct_features, pi*100, inorm))
 
-    test_set = torch$Tensor(as.matrix(Xs_aug$test))$cuda()
+    print("Computing based on saved model...")
+    #### IF NORMALIZE, NEED TO NORMALIZE Xs_aug$test...
+    test_set = torch$Tensor(as.matrix( (Xs_aug$test - matrix(norm_means_x,nrow=nrow(Xs_aug$test),ncol=ncol(Xs_aug$test),byrow=T))/matrix(norm_sds_x,nrow=nrow(Xs_aug$test),ncol=ncol(Xs_aug$test),byrow=T) ))$cuda()
     test_set_out = invlink(link)(saved_model$NN_y(test_set))$detach()$cpu()$data$numpy()
 
     # Saving weights
@@ -261,14 +304,26 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
       probs_y = test_set_out     # P(Y=k) with c=1 as reference, k=2, ..., K
       mu_y = apply(probs_y,1,which.max)
       mu_y2 = apply(res$all_params$y$probs, 1,which.max)   # using the p(y|x) posterior mode of test set --> why? could just predict
+
     }
     yhats = cbind(yhats,mu_y); colnames(yhats)[ncol(yhats)] = "dlglm"
-    yhats2 = cbind(yhats2,mu_y2); colnames(yhats2)[ncol(yhats2)] = "dlglm_mode"
+    yhats2 = cbind(yhats2,mu_y2); colnames(yhats2)[ncol(yhats2)] = "dlglm"
+    load(sprintf("%s/%s_%d_%d/%sopt_train.out", dir_name, mechanism, miss.params$miss_pct_features, pi*100, inorm))
 
     if(family=="Multinomial"){
-      prhats$"dlglm" = probs_y[,-1]
-      prhats2$"dlglm" = res$all_params$y$probs[,-1]
+      if(Cy==2){
+        prhats$"dlglm" = probs_y[,-1]
+        prhats2$"dlglm" = res$all_params$y$probs[,-1]   ## if only 2 classes, yield just one prob (pr(y=1))
+        prhats_train$"dlglm" = res_train$all_params$y$probs[,-1]
+      }else if(Cy>2){
+        prhats$"dlglm" = probs_y
+        prhats2$"dlglm" = res$all_params$y$probs   # if C classes, yield one prob per class
+        prhats_train$"dlglm" = res_train$all_params$y$probs
+      }
       # prhats$"dlglm_mode" = res$all_params$y$probs[,-1]
+      if(Cy==2){
+      }else if(Cy>2){
+      }
     }
 
     if(res$train_params$n_hidden_layers_y == 0){
@@ -278,8 +333,9 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
     colnames(tab)[ncol(tab)] = "dlglm"     ####### w: not right dim if HL's
 
     xhats$"dlglm" = res$xhat
-
+    rm(test_set)
   }
+  gc()
   if("idlglm" %in% methods){
     fname = sprintf("%s/Ignorable/res_dlglm_%s_%d_%d.RData",dir_name0,mechanism,miss_pct_features,pi*100)
     print(paste("idlglm Results file: ", fname))
@@ -288,10 +344,13 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
     # should contain "res", which is a list that contains "results" and "fixed.params" from now on. First iteration only contains res (no list) results object
     ires = res$results
     iniws = ires$train_params$niws_z
+    print("Loading saved model")
 
-    saved_model = torch$load(sprintf("%s/Ignorable/%s_%d_%d/opt_train_saved_model.pth",dir_name0, mechanism, miss.params$miss_pct_features, pi*100))
+    saved_model = torch$load(sprintf("%s/Ignorable/%s_%d_%d/%sopt_train_saved_model.pth",dir_name0, mechanism, miss.params$miss_pct_features, pi*100, inorm))
 
-    test_set = torch$Tensor(as.matrix(Xs_aug$test))$cuda()
+    print("Computing based on saved model...")
+
+    test_set = torch$Tensor(as.matrix( (Xs_aug$test - matrix(norm_means_x,nrow=nrow(Xs_aug$test),ncol=ncol(Xs_aug$test),byrow=T))/ matrix(norm_sds_x,nrow=nrow(Xs_aug$test),ncol=ncol(Xs_aug$test),byrow=T)))$cuda()
     test_set_out = invlink(link)(saved_model$NN_y(test_set))$detach()$cpu()$data$numpy()
     # Saving weights
     if(family=="Multinomial"){
@@ -315,15 +374,23 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
       # iprobs_y = t(apply(ieta, 1, softmax))  # should this be softmax?
       # imu_y = apply(iprobs_y,1,which.max)
       iprobs_y = test_set_out     # P(Y=k) with c=1 as reference, k=2, ..., K
-      imu_y = apply(probs_y,1,which.max)
+      imu_y = apply(iprobs_y,1,which.max)
       imu_y2 = apply(ires$all_params$y$probs, 1,which.max)   # using the p(y|x) posterior mode of test set --> why? could just predict
     }
     yhats = cbind(yhats,imu_y); colnames(yhats)[ncol(yhats)] = "idlglm"
-    yhats2 = cbind(yhats,imu_y2); colnames(yhats2)[ncol(yhats2)] = "idlglm_mode"
+    yhats2 = cbind(yhats2,imu_y2); colnames(yhats2)[ncol(yhats2)] = "idlglm"
+    load(sprintf("%s/Ignorable/%s_%d_%d/%sopt_train.out", dir_name, mechanism, miss.params$miss_pct_features, pi*100, inorm))
 
     if(family=="Multinomial"){
-      prhats$"idlglm" = iprobs_y[,-1]
-      prhats2$"idlglm" = ires$all_params$y$probs[,-1]
+      if(Cy==2){
+        prhats$"idlglm" = iprobs_y[,-1]
+        prhats2$"idlglm" = ires$all_params$y$probs[,-1]
+        prhats_train$"idlglm" = res_train$all_params$y$probs[,-1]  # res_train will be idlglm now
+      }else if(Cy>2){
+        prhats$"idlglm" = iprobs_y
+        prhats2$"idlglm" = ires$all_params$y$probs
+        prhats_train$"idlglm" = res_train$all_params$y$probs
+      }
       # prhats$"idlglm_mode" = ires$all_params$y$probs[,-1]
     }
 
@@ -334,8 +401,10 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
     colnames(tab)[ncol(tab)] = "idlglm"
 
     xhats$"idlglm" = ires$xhat
+    rm(test_set)
   }
   rm(Xs_aug)  # just need for dlglm
+  gc()
 
 
   if("mice" %in% methods){
@@ -344,61 +413,78 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
     if(!file.exists(fname_mice)){ break }
 
     load( fname_mice )
+    print("Loaded mice results")
     xhat_mice = res_mice$xhat_mice; xyhat_mice = res_mice$xyhat_mice  # training x/yhats
     res_MICE = res_mice$res_MICE; res_MICE_test=res_mice$res_MICE_test
     rm(res_mice)
-
     if(family=="Gaussian"){
       fits_MICE = list()
       for(i in 1:res_MICE$m){
+        if(i==1){
+          xhat_mice_train = mice::complete(res_MICE,i)
+        }else{ xhat_mice_train = xhat_mice_train + mice::complete(res_MICE,i) }
         fits_MICE[[i]] = glm(y ~ 0+., data=mice::complete(res_MICE,i))
         fits_MICE[[i]]$data = NULL; fits_MICE[[i]]$model=NULL
       }
+      xhat_mice_train = xhat_mice_train/res_MICE$m
       fit_MICE = pool(fits_MICE)
     }else if(family=="Multinomial"){
       fits_MICE = list()
       for(i in 1:res_MICE$m){
+        if(i==1){
+          xhat_mice_train = mice::complete(res_MICE,i)
+        }else{ xhat_mice_train = xhat_mice_train + mice::complete(res_MICE,i) }
         fits_MICE[[i]] = nnet::multinom(y ~ 0+., data=mice::complete(res_MICE,i))
         fits_MICE[[i]]$data = NULL; fits_MICE[[i]]$model=NULL
       }
+      xhat_mice_train = xhat_mice_train/res_MICE$m
       fit_MICE = pool(fits_MICE)
     }
+    xhat_mice_train = xhat_mice_train[,-ncol(xhat_mice_train)]
 
     dummy_fit_MICE = fits_MICE[[1]]; rm(fits_MICE)
     dummy_fit_MICE$coefficients = fit_MICE$pooled$estimate
     yhat_mice_pred = predict(dummy_fit_MICE,newdata = Xs$test)
 
+    print("Completing test X")
     Xs_test_mice = mice::complete(res_MICE_test,1)
     for(j in 2:res_MICE_test$m){
       Xs_test_mice = Xs_test_mice + mice::complete(res_MICE_test,j)
     }
     Xs_test_mice = Xs_test_mice/res_MICE_test$m          # average of multiply-imputed test sets
 
+    print("Predicting y")
     yhat_mice_pred2 = predict(dummy_fit_MICE,newdata = Xs_test_mice)
 
     w_mice = c(fit_MICE$pooled$estimate)
 
-    yhats = cbind(yhats,yhat_mice_pred); colnames(yhats)[ncol(yhats)] = "mice"
-    yhats2 = cbind(yhats2,yhat_mice_pred2); colnames(yhats2)[ncol(yhats2)] = "mice"
+    yhats = cbind(yhats,as.numeric(yhat_mice_pred)); colnames(yhats)[ncol(yhats)] = "mice"
+    yhats2 = cbind(yhats2,as.numeric(yhat_mice_pred2)); colnames(yhats2)[ncol(yhats2)] = "mice"
 
     if(family=="Multinomial"){
       prhat_mice_pred = predict(dummy_fit_MICE, newdata=Xs$test, type="probs")
       prhat_mice_pred2 = predict(dummy_fit_MICE, newdata=Xs_test_mice, type="probs")
+      # if(Cy==2){
+      #   prhats$"mice" = matrix(nrow=length(prhat_mice_pred),ncol=2); prhats$"mice"[,2] = prhat_mice_pred; prhats$"mice"[,1] = 1-prhats$"mice"[,2]
+      #   prhats2$"mice" = matrix(nrow=length(prhat_mice_pred2),ncol=2); prhats2$"mice"[,2] = prhat_mice_pred2; prhats2$"mice"[,1] = 1-prhats2$"mice"[,2]
+      # }else{
+      #   prhats$"mice" = prhat_mice_pred
+      #   prhats2$"mice" = prhat_mice_pred2
+      # }
+      colnames(prhat_mice_pred) = NULL;      colnames(prhat_mice_pred2) = NULL
       prhats$"mice" = prhat_mice_pred
       prhats2$"mice" = prhat_mice_pred2
+      prhats_train$"mice" = predict(dummy_fit_MICE, newdata=xhat_mice_train, type="probs")
+
     }
     tab = cbind(tab,w_mice); colnames(tab)[ncol(tab)] = "mice"
 
-    xhat_mice_test = mice::complete(res_MICE_test,1)
-    for(c in 2:res_MICE_test$m){
-      xhat_mice_test = xhat_mice_test + mice::complete(res_MICE_test,c)
-    }
-    xhat_mice_test = xhat_mice_test/res_MICE_test$m
-    xhat_mice_test = xhat_mice_test[,-ncol(xhat_mice_test)]
 
     xhats$"mice" = xhat_mice
-
+    rm(xhat_mice)
+    rm(xyhat_mice)
   }
+  gc()
 
   print("All glms fitted. Plotting diagnostics")
 
@@ -421,8 +507,8 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
                            betas, w_real, w_cat, data_types_x, data_types_x_0, Ignorable){
 
       if(family%in% c("Gaussian","Poisson")){
-        if(Ignorable){ fname = sprintf("%s/%s_%d_%d/pred_Y_idlglm.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100)
-        }else{ fname = sprintf("%s/%s_%d_%d/pred_Y_dlglm.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100) }
+        if(Ignorable){ fname = sprintf("%s/%s_%d_%d/%spred_Y_idlglm.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100, inorm)
+        }else{ fname = sprintf("%s/%s_%d_%d/%spred_Y_dlglm.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100, inorm) }
 
         png(fname)
         boxplot(as.numeric(unlist(Ys$test - as.numeric(mu_y))), main="Diff between test and pred Y",outline=F)  # prediction of Y (mu_y as)
@@ -431,7 +517,8 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
         tab = table(mu_y,unlist(Ys_test))
         p<-tableGrob(round(tab,3))
 
-        ARI_val = adjustedRandIndex(mu_y,unlist(Ys_test))
+        library(mclust)
+        ARI_val = mclust::adjustedRandIndex(mu_y,unlist(Ys_test))
         title <- textGrob(sprintf("Y, Pred(r), true(c), ARI=%f",round(ARI_val,3)),gp=gpar(fontsize=8))
         padding <- unit(5,"mm")
 
@@ -444,21 +531,21 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
           title,
           1, 1, 1, ncol(p))
 
-        if(Ignorable){ fname = sprintf("%s/%s_%d_%d/pred_classes_idlglm.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100)
-        }else{ fname = sprintf("%s/%s_%d_%d/pred_classes_dlglm.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100) }
+        if(Ignorable){ fname = sprintf("%s/%s_%d_%d/%spred_classes_idlglm.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100, inorm)
+        }else{ fname = sprintf("%s/%s_%d_%d/%spred_classes_dlglm.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100, inorm) }
         ggsave(p,file=fname, width=6, height=6, units="in")
       }
 
-      fname = if(Ignorable){sprintf("%s/%s_%d_%d/coefs_real_idlglm.png",dir_name,mechanism, miss.params$miss_pct_features, pi*100)
-        }else{sprintf("%s/%s_%d_%d/coefs_real_dlglm.png",dir_name,mechanism, miss.params$miss_pct_features, pi*100)}
+      fname = if(Ignorable){sprintf("%s/%s_%d_%d/%scoefs_real_idlglm.png",dir_name,mechanism, miss.params$miss_pct_features, pi*100, inorm)
+      }else{sprintf("%s/%s_%d_%d/%scoefs_real_dlglm.png",dir_name,mechanism, miss.params$miss_pct_features, pi*100, inorm)}
       png(fname,res = 300,width = 4, height = 4, units = 'in')
       ymin = min(c(betas[data_types_x_0=="real"], w_real))
       ymax = max(c(betas[data_types_x_0=="real"], w_real))
       plot(c(betas[data_types_x_0=="real"]), main="True (black) vs fitted (red) real coefs", xlab="covariate", ylab="coefficient", ylim=c(ymin,ymax)); points(c(w_real),col="red", cex=0.5)
       dev.off()
       if(sum(data_types_x=="cat")>0){
-        fname = if(Ignorable){sprintf("%s/%s_%d_%d/coefs_cat_idlglm.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100)
-          }else{sprintf("%s/%s_%d_%d/coefs_cat_dlglm.tiff",dir_name, mechanism, miss.params$miss_pct_features, pi*100)}
+        fname = if(Ignorable){sprintf("%s/%s_%d_%d/%scoefs_cat_idlglm.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100, inorm)
+        }else{sprintf("%s/%s_%d_%d/%scoefs_cat_dlglm.tiff",dir_name, mechanism, miss.params$miss_pct_features, pi*100, inorm)}
         png(fname,res = 300,width = 4, height = 4, units = 'in')
         ymin = min(c(betas[data_types_x_0=="cat"],sapply(split(w_cat, rep(1:length(Cs), Cs)), function(x){mean((x - c(0,x[-length(x)]))[-1])})))-0.005
         ymax = max(c(betas[data_types_x_0=="cat"],sapply(split(w_cat, rep(1:length(Cs), Cs)), function(x){mean((x - c(0,x[-length(x)]))[-1])})))+0.005
@@ -476,7 +563,7 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
 
     plots_others = function(Ys_test, yhat, family, dir_name, mechanism, miss_pct_features, pi,
                             betas, w, data_types_x_0, method){
-      png(sprintf("%s/%s_%d_%d/coefs_real_%s.png",dir_name,mechanism, miss.params$miss_pct_features, pi*100, method),
+      png(sprintf("%s/%s_%d_%d/%scoefs_real_%s.png",dir_name,mechanism, miss.params$miss_pct_features, pi*100, method, inorm),
           res = 300,width = 4, height = 4, units = 'in')
       ymin = min(c(betas[data_types_x_0=="real"], w))
       ymax = max(c(betas[data_types_x_0=="real"], w))
@@ -484,7 +571,7 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
       dev.off()
 
       if(family%in% c("Gaussian","Poisson")){
-        fname = sprintf("%s/%s_%d_%d/pred_Y_%s.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100,method)
+        fname = sprintf("%s/%s_%d_%d/%spred_Y_%s.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100,method, inorm)
         png(fname)
         boxplot(as.numeric(unlist(Ys_test - as.numeric(yhat))), main="Diff between test and pred Y",outline=F)  # prediction of Y (mu_y as)
         dev.off()
@@ -493,7 +580,7 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
         p<-tableGrob(round(tab,3))
 
         library(mclust)
-        ARI_val = mclust::adjustedRandIndex(yhat,unlist(Ys_test))
+        ARI_val = adjustedRandIndex(yhat,unlist(Ys_test))
         title <- textGrob(sprintf("Y, Pred(r), true(c), ARI=%f",round(ARI_val,3)),gp=gpar(fontsize=8))
         padding <- unit(5,"mm")
 
@@ -506,7 +593,7 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
           title,
           1, 1, 1, ncol(p))
 
-        fname = sprintf("%s/%s_%d_%d/pred_classes_%s.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100,method)
+        fname = sprintf("%s/%s_%d_%d/%spred_classes_%s.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100,method, inorm)
         ggsave(p,file=fname, width=6, height=6, units="in")
       }
     }
@@ -515,7 +602,7 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
     if("mean" %in% methods){ plots_others(Ys$test, yhat_mean_pred, family, dir_name, mechanism, miss.params$miss_pct_features, pi,
                                           betas, w_mean, data_types_x_0, "mean") }
     if("mice" %in% methods){ plots_others(Ys$test, yhat_mice_pred, family, dir_name, mechanism, miss.params$miss_pct_features, pi,
-                                         betas, w_mice, data_types_x_0, "mice") }
+                                          betas, w_mice, data_types_x_0, "mice") }
   }
 
 
@@ -523,7 +610,7 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
   L1s_y = abs( matrix(unlist(Ys$test),nrow=nrow(Ys$test),ncol=ncol(yhats)) - yhats )
   L1s_y2 = abs( matrix(unlist(Ys$test),nrow=nrow(Ys$test),ncol=ncol(yhats2)) - yhats2 )
   if(family%in% c("Gaussian","Poisson")){
-    png(filename=sprintf("%s/%s_%d_%d/predY.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100),res = 300,width = 6, height = 6, units = 'in')
+    png(filename=sprintf("%s/%s_%d_%d/%spredY.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100, inorm),res = 300,width = 6, height = 6, units = 'in')
     boxplot(L1s_y,names=colnames(L1s_y), outline=F,
             main="Abs Diff: test Y and predicted Y")
     # boxplot(as.numeric(unlist(abs(Ys$test - mu_y))),
@@ -532,7 +619,7 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
     #         main="Absolute Difference between test Y and predicted Y")
     dev.off()
 
-    png(filename=sprintf("%s/%s_%d_%d/predY_missTestX.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100),res = 300,width = 6, height = 6, units = 'in')
+    png(filename=sprintf("%s/%s_%d_%d/%spredY_missTestX.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100, inorm),res = 300,width = 6, height = 6, units = 'in')
     boxplot(L1s_y2,names=colnames(L1s_y2), outline=F,
             main="Abs Diff: test Y and pred Y (miss testX)")
     # boxplot(as.numeric(unlist(abs(Ys$test - mu_y))),
@@ -556,10 +643,10 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
       p,
       title,
       1, 1, 1, ncol(p))
-    ggsave(p,file=sprintf("%s/%s_%d_%d/mean_L1_probY.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100), width=6, height=4, units="in")
+    ggsave(p,file=sprintf("%s/%s_%d_%d/%smean_L1_probY.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100, inorm), width=6, height=4, units="in")
 
     prs_L1 = lapply(prhats, function(x){abs(x - c(prs$test)[[1]])})
-    png(filename=sprintf("%s/%s_%d_%d/L1s_probY.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100),res = 300,width = 10, height = 10, units = 'in')
+    png(filename=sprintf("%s/%s_%d_%d/%sL1s_probY.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100, inorm),res = 300,width = 10, height = 10, units = 'in')
     boxplot(prs_L1, names=names(prs_L1),
             outline=F, main="Abs deviation between true and pred Pr(Y)")
     dev.off()
@@ -576,10 +663,10 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
       p,
       title,
       1, 1, 1, ncol(p))
-    ggsave(p,file=sprintf("%s/%s_%d_%d/mean_L1_probY_missTestX.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100), width=6, height=4, units="in")
+    ggsave(p,file=sprintf("%s/%s_%d_%d/%smean_L1_probY_missTestX.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100, inorm), width=6, height=4, units="in")
 
     prs_L1 = lapply(prhats2, function(x){abs(x - c(prs$test)[[1]])})
-    png(filename=sprintf("%s/%s_%d_%d/L1s_probY_missTestX.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100),res = 300,width = 10, height = 10, units = 'in')
+    png(filename=sprintf("%s/%s_%d_%d/%sL1s_probY_missTestX.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100, inorm),res = 300,width = 10, height = 10, units = 'in')
     boxplot(prs_L1, names=names(prs_L1),
             outline=F, main="Abs deviation: true and pred Pr(Y) (missing testX)")
     dev.off()
@@ -600,7 +687,7 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
       p,
       title,
       1, 1, 1, ncol(p))
-    ggsave(p,file=sprintf("%s/%s_%d_%d/coefs_tab.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100), width=6, height=25, units="in")
+    ggsave(p,file=sprintf("%s/%s_%d_%d/%scoefs_tab.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100, inorm), width=6, height=25, units="in")
 
 
     ## Compute RB, PB, AW, CR (no CR/AW b/c no 95% CI for dlglm coef est's)
@@ -628,7 +715,7 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
       p,
       title,
       1, 1, 1, ncol(p))
-    ggsave(p,file=sprintf("%s/%s_%d_%d/coefs_tab2.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100), width=25, height=floor(P/2), units="in", limitsize = FALSE)
+    ggsave(p,file=sprintf("%s/%s_%d_%d/%scoefs_tab2.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100, inorm), width=25, height=floor(P/2), units="in", limitsize = FALSE)
   }
 
   ### CANT DO CR WITH DLGLM ###
@@ -676,7 +763,7 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
   rel_diffs = L1s_y/max(abs(Ys$test),0.001)
   pct_diffs = colMeans(rel_diffs)
 
-  png(filename=sprintf("%s/%s_%d_%d/predY_rel.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100),res = 300,width = 12, height = 12, units = 'in')
+  png(filename=sprintf("%s/%s_%d_%d/%spredY_rel.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100, inorm),res = 300,width = 12, height = 12, units = 'in')
   boxplot(rel_diffs, outline=F,
           names=colnames(rel_diffs),
           main="Relative Difference between test Y and predicted Y")
@@ -684,6 +771,7 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
 
   p<-tableGrob(t(round(pct_diffs,3)))
   title <- textGrob("Rel diff between true and pred Ys",gp=gpar(fontsize=8.5))
+  padding <- unit(5,"mm")
   p <- gtable_add_rows(
     p,
     heights = grobHeight(title) + padding,
@@ -692,32 +780,33 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
     p,
     title,
     1, 1, 1, ncol(p))
-  ggsave(p,file=sprintf("%s/%s_%d_%d/mean_pctdiff_predY.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100), width=6, height=4, units="in")
+  ggsave(p,file=sprintf("%s/%s_%d_%d/%smean_pctdiff_predY.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100, inorm), width=6, height=4, units="in")
 
   ###########################################
   ###### look at imputation in missing ######
   ###########################################
-
+  print("Imputation")
   diffs = lapply(xhats, function(x) abs(x - Xs$test))
   L1s = lapply(diffs, function(x) x[Rxs$test==0])
-  pcts = lapply(diffs, function(x) (x/min(abs(Xs$test), 0.001))[Rxs$test==0])
+  pcts = lapply(diffs, function(x) (x/max(abs(Xs$test), 0.001))[Rxs$test==0])
   # Mean/zero imputation results:
 
   # compare both imputation results
   if(grepl("x",case)){
-    for(c in miss_cols){
-      ids = Rxs$test[,c]==0
-      diffs_df = lapply(diffs,function(x) x[ids,c])
-      png(filename=sprintf("%s/%s_%d_%d/imputedX_col%d.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100,c),res = 300,width = 10, height = 10, units = 'in')
-      boxplot(diffs_df, names=names(diffs_df),
-              outline=F, main=sprintf("Abs dev between true and imputed X in col%d",c))
-      dev.off()
-    }
-    png(filename=sprintf("%s/%s_%d_%d/imputedX.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100),res = 300,width = 10, height = 10, units = 'in')
+    # for(c in miss_cols){
+    #   ids = Rxs$test[,c]==0
+    #   diffs_df = lapply(diffs,function(x) x[ids,c])
+    #   png(filename=sprintf("%s/%s_%d_%d/%simputedX_col%d.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100, inorm,c),res = 300,width = 10, height = 10, units = 'in')
+    #   boxplot(diffs_df, names=names(diffs_df),
+    #           outline=F, main=sprintf("Abs dev between true and imputed X in col%d",c))
+    #   dev.off()
+    # }
+    png(filename=sprintf("%s/%s_%d_%d/%simputedX.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100, inorm),res = 300,width = 10, height = 10, units = 'in')
     boxplot(L1s, names=names(L1s),
             outline=F, main="Absolute deviation between true and imputed X")
     dev.off()
-    png(filename=sprintf("%s/%s_%d_%d/imputedpctX.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100),res = 300,width = 10, height = 10, units = 'in')
+    png(filename=sprintf("%s/%s_%d_%d/%simputedpctX.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100, inorm),
+        res = 300,width = 10, height = 10, units = 'in')
     boxplot(pcts, names=names(pcts),
             outline=F, main="Relative difference between true and imputed X")
     dev.off()
@@ -742,7 +831,7 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
       p,
       title,
       1, 1, 1, ncol(p))
-    ggsave(p,file=sprintf("%s/%s_%d_%d/mean_L1s_X.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100), width=6, height=4, units="in")
+    ggsave(p,file=sprintf("%s/%s_%d_%d/%smean_L1s_X.png",dir_name, mechanism, miss.params$miss_pct_features, pi*100, inorm), width=6, height=4, units="in")
   }
   # if(grepl("y",case)){
   #   tiff(filename=sprintf("%s/%s_%d_%d/imputedY.tiff",dir_name, mechanism, miss.params$miss_pct_features, pi*100),res = 300,width = 5, height = 5, units = 'in')
@@ -810,29 +899,245 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
   # ### PREDICTION: mean diff in prob simulated vs predicted (complete testX p, and imputed testX p2)
   # p = t(unlist(lapply(prhats,function(x){mean(abs(x - c(prs$test)[[1]]))})))
   # p2 = t(unlist(lapply(prhats2,function(x){mean(abs(x - c(prs$test)[[1]]))})))
+  print("Prediction")
+  yhats = asplit(yhats,2)
+  yhats2 = asplit(yhats2,2)
+
+  cutoffs = seq(0.01,1,0.01)
+
+  ### use prhats_train list to tune cutoff: mice, mean, dlglm, idlglm. probs of training set.
+  ### NEED TO TUNE CUTOFFS FOR: PPV, TPR, FPR, F1, kappa, and mcc
+  ## measures::PPV(truth, response, positive, probabilities = NULL)
+  library(yardstick)
+
   if(family=="Multinomial"){
+    all_classes = unique(Ys$test$Y)
+    if(Cy==2){
+      yhats_cut = list(); yhats_cut2 = list()
+      # for(i in 1:length(prhats)){
+      for(m in 1:length(methods)){
+        cut_metrics = matrix(nrow=length(cutoffs),ncol=6)
+        colnames(cut_metrics) = c("PPV","TPR","FPR","F1","kappa","MCC"); rownames(cut_metrics) = cutoffs
+        for(c in 1:length(cutoffs)){
+          yhat = (prhats_train[which(names(prhats_train)==methods[m])][[1]]>=cutoffs[c])^2*max(Ys$train$Y) + (prhats_train[which(names(prhats_train)==methods[m])][[1]]<cutoffs[c])^2*min(Ys$train$Y)
+          #### use kappa as main metric
+          ppv=measures::PPV(Ys$train$Y, yhat, max(Ys$train$Y))
+          tpr=measures::TPR(Ys$train$Y, yhat, max(Ys$train$Y))
+          fpr=measures::FPR(Ys$train$Y, yhat, min(Ys$train$Y), max(Ys$train$Y))
+          f1=measures::F1(Ys$train$Y, yhat, max(Ys$train$Y))
+          kap=measures::KAPPA(Ys$train$Y, yhat)
+          mcc=yardstick::mcc_vec(truth=factor(c(Ys$train$Y),levels=levels(factor(Ys$train$Y))), estimate=factor(yhat,levels=levels(factor(Ys$train$Y))))
+          cut_metrics[c,] = c(ppv,tpr,fpr,f1,kap,mcc)
+        }
+        opt_cutoff = as.numeric(names(which.max(cut_metrics[,"kappa"])))
+        yhats_cut[[m]] = (prhats[which(names(prhats)==methods[m])][[1]]>opt_cutoff)^2*max(Ys$train$Y) + (prhats[which(names(prhats)==methods[m])][[1]]<=opt_cutoff)^2*min(Ys$train$Y)    # apply(prhats,1, function(x){(x[2]>opt_cutoff)^2})
+        yhats_cut2[[m]] = (prhats2[which(names(prhats2)==methods[m])][[1]]>opt_cutoff)^2*max(Ys$train$Y) + (prhats2[which(names(prhats2)==methods[m])][[1]]<=opt_cutoff)^2*min(Ys$train$Y)    # apply(prhats,1, function(x){(x[2]>opt_cutoff)^2})
+        names(yhats_cut)[m] = methods[m]; names(yhats_cut2)[m] = methods[m]
+      }
+      AUC = lapply(prhats,function(x){as.numeric(pROC::auc(c(Ys$test$Y), x))})
+      AUC2 = lapply(prhats2,function(x){as.numeric(pROC::auc(c(Ys$test$Y), x))})   ### CAT ONLY
+
+      br1 = lapply(prhats, function(x){measures::Brier(x,c(Ys$test$Y), min(Ys$test$Y), max(Ys$test$Y))})
+      br2 = lapply(prhats2, function(x){measures::Brier(x,c(Ys$test$Y), min(Ys$test$Y), max(Ys$test$Y))})  ### BINARY ONLY
+
+      # TPR1 = lapply(yhats, function(x){if(all(Ys$test$Y != x)){0} else{measures::TPR(c(Ys$test$Y), x, max(Ys$test$Y))}})
+      # TPR2 = lapply(yhats2, function(x){if(all(Ys$test$Y != x)){0} else{measures::TPR(c(Ys$test$Y), x, max(Ys$test$Y))}})
+      # FPR1 = lapply(yhats, function(x){measures::FPR(c(Ys$test$Y), x, min(Ys$test$Y), max(Ys$test$Y))})
+      # FPR2 = lapply(yhats2, function(x){measures::FPR(c(Ys$test$Y), x, min(Ys$test$Y), max(Ys$test$Y))})
+      # F11 = lapply(yhats, function(x){measures::F1(c(Ys$test$Y), x, max(Ys$test$Y))})
+      # F12 = lapply(yhats2, function(x){measures::F1(c(Ys$test$Y), x, max(Ys$test$Y))})
+      # PPV1 = lapply(yhats, function(x){measures::PPV(c(Ys$test$Y), x, max(Ys$test$Y))})
+      # PPV2 = lapply(yhats2, function(x){measures::PPV(c(Ys$test$Y), x, max(Ys$test$Y))})
+
+      TPR1 = lapply(yhats_cut, function(x){if(all(Ys$test$Y != x)){0} else{measures::TPR(c(Ys$test$Y), x, max(Ys$test$Y))}})
+      TPR2 = lapply(yhats_cut2, function(x){if(all(Ys$test$Y != x)){0} else{measures::TPR(c(Ys$test$Y), x, max(Ys$test$Y))}})
+      FPR1 = lapply(yhats_cut, function(x){measures::FPR(c(Ys$test$Y), x, min(Ys$test$Y), max(Ys$test$Y))})
+      FPR2 = lapply(yhats_cut2, function(x){measures::FPR(c(Ys$test$Y), x, min(Ys$test$Y), max(Ys$test$Y))})
+      F11 = lapply(yhats_cut, function(x){measures::F1(c(Ys$test$Y), x, max(Ys$test$Y))})
+      F12 = lapply(yhats_cut2, function(x){measures::F1(c(Ys$test$Y), x, max(Ys$test$Y))})
+      PPV1 = lapply(yhats_cut, function(x){measures::PPV(c(Ys$test$Y), x, max(Ys$test$Y))})
+      PPV2 = lapply(yhats_cut2, function(x){measures::PPV(c(Ys$test$Y), x, max(Ys$test$Y))})
+      all_AUC = AUC; all_AUC2 = AUC2; all_br1 = br1; all_br2 = br2; all_TPR1=TPR1; all_TPR2=TPR2
+      all_FPR1=FPR1; all_FPR2=FPR2; all_F11=F11; all_F12=F12; all_PPV1 = PPV1; all_PPV2 = PPV2
+    } else{
+      #### if more than one class, compute AUC and Brier scores on class 1 vs rest, then class 2 vs rest, ... . Then average?
+      all_AUC = list(); all_AUC2 = list(); all_br1=list(); all_br2=list(); all_TPR1=list(); all_TPR2=list()
+      all_FPR1=list(); all_FPR2=list(); all_F11=list(); all_F12=list(); all_PPV1=list(); all_PPV2=list()
+
+      # for(i in 1:length(prhats)){
+      #   for(c in 1:length(cutoffs)){
+      #     yhat = apply(prhats_train[[i]],1, function(x){(x[2]>cutoffs[c])^2})
+      #   }
+      #   yhats_cut[[i]] = apply(prhats,1, function(x){(x[2]>opt_cutoff)^2})
+      #   names(yhats_cut)[i] = names(prhats)[i]
+      # }
+
+      yhats_cut = list(); yhats_cut2 = list()
+      # for(i in 1:length(prhats)){
+      # for(m in 1:length(methods)){
+      #   cut_metrics = matrix(nrow=length(cutoffs),ncol=6)
+      #   colnames(cut_metrics) = c("PPV","TPR","FPR","F1","kappa","MCC"); rownames(cut_metrics) = cutoffs
+      #   for(c in 1:length(cutoffs)){
+      #     yhat = (prhats_train[which(names(prhats_train)==methods[m])][[1]]>=cutoffs[c])^2*max(Ys$train$Y) + (prhats_train[which(names(prhats_train)==methods[m])][[1]]<cutoffs[c])^2*min(Ys$train$Y)
+      #     #### use kappa as main metric
+      #     ppv=measures::PPV(Ys$train$Y, yhat, max(Ys$train$Y))
+      #     tpr=measures::TPR(Ys$train$Y, yhat, max(Ys$train$Y))
+      #     fpr=measures::FPR(Ys$train$Y, yhat, min(Ys$train$Y), max(Ys$train$Y))
+      #     f1=measures::F1(Ys$train$Y, yhat, max(Ys$train$Y))
+      #     kap=measures::KAPPA(Ys$train$Y, yhat)
+      #     mcc=yardstick::mcc_vec(truth=factor(c(Ys$train$Y),levels=levels(factor(Ys$train$Y))), estimate=factor(yhat,levels=levels(factor(Ys$train$Y))))
+      #     cut_metrics[c,] = c(ppv,tpr,fpr,f1,kap,mcc)
+      #   }
+      #   opt_cutoff = as.numeric(names(which.max(cut_metrics[,"kappa"])))
+      #   yhats_cut[[m]] = (prhats[which(names(prhats)==methods[m])][[1]]>opt_cutoff)^2*max(Ys$train$Y) + (prhats[which(names(prhats)==methods[m])][[1]]<=opt_cutoff)^2*min(Ys$train$Y)    # apply(prhats,1, function(x){(x[2]>opt_cutoff)^2})
+      #   yhats_cut2[[m]] = (prhats2[which(names(prhats2)==methods[m])][[1]]>opt_cutoff)^2*max(Ys$train$Y) + (prhats2[which(names(prhats2)==methods[m])][[1]]<=opt_cutoff)^2*min(Ys$train$Y)    # apply(prhats,1, function(x){(x[2]>opt_cutoff)^2})
+      #   names(yhats_cut)[m] = methods[m]; names(yhats_cut2)[m] = methods[m]
+      # }
+
+      for(m in 1:length(methods)){
+        all_AUC[[m]] = rep(NA, Cy); names(all_AUC)[m]=methods[m]; names(all_AUC[[m]]) = all_classes
+        all_AUC2[[m]] = rep(NA, Cy); names(all_AUC2)[m]=methods[m]; names(all_AUC2[[m]]) = all_classes
+        all_br1[[m]] = rep(NA, Cy); names(all_br1)[m]=methods[m]; names(all_br1[[m]]) = all_classes
+        all_br2[[m]] = rep(NA, Cy); names(all_br2)[m]=methods[m]; names(all_br2[[m]]) = all_classes
+        all_TPR1[[m]] = rep(NA, Cy); names(all_TPR1)[m]=methods[m]; names(all_TPR1[[m]]) = all_classes
+        all_TPR2[[m]] = rep(NA, Cy); names(all_TPR2)[m]=methods[m]; names(all_TPR2[[m]]) = all_classes
+        all_FPR1[[m]] = rep(NA, Cy); names(all_FPR1)[m]=methods[m]; names(all_FPR1[[m]]) = all_classes
+        all_FPR2[[m]] = rep(NA, Cy); names(all_FPR2)[m]=methods[m]; names(all_FPR2[[m]]) = all_classes
+        all_F11[[m]] = rep(NA, Cy); names(all_F11)[m]=methods[m]; names(all_F11[[m]]) = all_classes
+        all_F12[[m]] = rep(NA, Cy); names(all_F12)[m]=methods[m]; names(all_F12[[m]]) = all_classes
+        all_PPV1[[m]] = rep(NA, Cy); names(all_PPV1)[m]=methods[m]; names(all_PPV1[[m]]) = all_classes
+        all_PPV2[[m]] = rep(NA, Cy); names(all_PPV2)[m]=methods[m]; names(all_PPV2[[m]]) = all_classes
+
+        for(c in 1:Cy){
+          print(c)
+          Yc = c(Ys$test$Y); Yc[Yc!=all_classes[c]] = -999   # negative class dummy set as -999
+
+          ###################################################
+          Yc_train = c(Ys$train$Y); Yc_train[Yc_train!=all_classes[c]] = -999
+          cut_metrics = matrix(nrow=length(cutoffs),ncol=6)
+          colnames(cut_metrics) = c("PPV","TPR","FPR","F1","kappa","MCC"); rownames(cut_metrics) = cutoffs
+          prhats_train_cut = prhats_train[which(names(prhats_train)==methods[m])][[1]][,all_classes[c]]
+          prhats_cut = prhats[which(names(prhats)==methods[m])][[1]][,all_classes[c]]
+          prhats_cut2 = prhats2[which(names(prhats2)==methods[m])][[1]][,all_classes[c]]
+
+          # prhats_train_cut = prhats_train[which(names(prhats_train)==methods[m])][[1]][,c]
+          # prhats_cut = prhats[which(names(prhats)==methods[m])][[1]][,c]
+          # prhats_cut2 = prhats2[which(names(prhats2)==methods[m])][[1]][,c]
+
+          for(co in 1:length(cutoffs)){
+            yhat = all_classes[c]*(prhats_train_cut>=cutoffs[co])^2 +
+              (-999)*(prhats_train_cut<cutoffs[co])^2
+            #### use kappa as main metric
+            ppv=measures::PPV(Yc_train, yhat, all_classes[c])
+            tpr=measures::TPR(Yc_train, yhat, all_classes[c])
+            fpr=measures::FPR(Yc_train, yhat, -999, all_classes[c])
+            f1=measures::F1(Yc_train, yhat, all_classes[c])
+            kap=measures::KAPPA(Yc_train, yhat)
+            mcc=yardstick::mcc_vec(truth=factor(c(Yc_train),levels=levels(factor(Yc_train))), estimate=factor(yhat,levels=levels(factor(Yc_train))))
+            cut_metrics[co,] = c(ppv,tpr,fpr,f1,kap,mcc)
+          }
+
+          opt_cutoff = as.numeric(names(which.max(cut_metrics[,"kappa"])))
+          yhats_cut[[m]] = all_classes[c]*(prhats_cut>=opt_cutoff)^2 + (-999)*(prhats_cut<opt_cutoff)^2    # apply(prhats,1, function(x){(x[2]>opt_cutoff)^2})
+          yhats_cut2[[m]] = all_classes[c]*(prhats_cut2>=opt_cutoff)^2 + (-999)*(prhats_cut2<opt_cutoff)^2    # apply(prhats,1, function(x){(x[2]>opt_cutoff)^2})
+          names(yhats_cut)[m] = methods[m]; names(yhats_cut2)[m] = methods[m]
+
+          ########################################
+
+          all_AUC[[m]][c] = as.numeric(pROC::auc(Yc, prhats[names(prhats)==methods[m]][[1]][,c], levels=c(-999, all_classes[c]) ))
+          all_AUC2[[m]][c] = as.numeric(pROC::auc(Yc, prhats2[names(prhats2)==methods[m]][[1]][,c], levels=c(-999, all_classes[c]) ))
+          all_br1[[m]][c] = measures::Brier(prhats[names(prhats)==methods[m]][[1]][,c], Yc, -999, all_classes[c])
+          all_br2[[m]][c] = measures::Brier(prhats2[names(prhats2)==methods[m]][[1]][,c], Yc, -999, all_classes[c])
+          # if(all(yhats[names(yhats)==methods[m]][[1]] != Yc)){  # no true positives
+          #   all_TPR1[[m]][c] = 0
+          # }else{
+          #   all_TPR1[[m]][c] = measures::TPR(yhats[names(yhats)==methods[m]][[1]], Yc, all_classes[c])
+          # }
+          # if(all(yhats2[names(yhats2)==methods[m]][[1]] != Yc)){
+          #   all_TPR2[[m]][c] = 0
+          # }else{
+          #   all_TPR2[[m]][c] = measures::TPR(yhats2[names(yhats2)==methods[m]][[1]], Yc, all_classes[c])
+          # }
+          # yhats0 = yhats[names(yhats)==methods[m]][[1]]; yhats0[yhats0!=all_classes[c]]=-999
+          # yhats20 = yhats2[names(yhats2)==methods[m]][[1]]; yhats20[yhats20!=all_classes[c]]=-999
+          # all_FPR1[[m]][c] = measures::FPR(yhats0, Yc, -999, all_classes[c])
+          # all_FPR2[[m]][c] = measures::FPR(yhats20, Yc, -999, all_classes[c])
+          # all_F11[[m]][c] = measures::F1(yhats[names(yhats)==methods[m]][[1]], Yc, all_classes[c])
+          # all_F12[[m]][c] = measures::F1(yhats2[names(yhats2)==methods[m]][[1]], Yc, all_classes[c])
+          # all_PPV1[[m]][c] = measures::PPV(yhats[names(yhats)==methods[m]][[1]], Yc, all_classes[c])
+          # all_PPV2[[m]][c] = measures::PPV(yhats2[names(yhats2)==methods[m]][[1]], Yc, all_classes[c])
 
 
-    AUC = lapply(prhats,function(x){as.numeric(pROC::auc(c(Ys$test$Y), x))})
-    AUC2 = lapply(prhats,function(x){as.numeric(pROC::auc(c(Ys$test$Y), x))})   ### CAT ONLY
+          if(all(yhats_cut[names(yhats_cut)==methods[m]][[1]] != Yc)){  # no true positives
+            all_TPR1[[m]][c] = 0
+          }else{
+            all_TPR1[[m]][c] = measures::TPR(yhats_cut[names(yhats_cut)==methods[m]][[1]], Yc, all_classes[c])
+          }
+          if(all(yhats_cut2[names(yhats_cut2)==methods[m]][[1]] != Yc)){
+            all_TPR2[[m]][c] = 0
+          }else{
+            all_TPR2[[m]][c] = measures::TPR(yhats_cut2[names(yhats_cut2)==methods[m]][[1]], Yc, all_classes[c])
+          }
+          yhats0 = yhats_cut[names(yhats_cut)==methods[m]][[1]]; yhats0[yhats0!=all_classes[c]]=-999
+          yhats20 = yhats_cut2[names(yhats_cut2)==methods[m]][[1]]; yhats20[yhats20!=all_classes[c]]=-999
+          all_FPR1[[m]][c] = measures::FPR(yhats0, Yc, -999, all_classes[c])
+          all_FPR2[[m]][c] = measures::FPR(yhats20, Yc, -999, all_classes[c])
+          all_F11[[m]][c] = measures::F1(yhats_cut[names(yhats_cut)==methods[m]][[1]], Yc, all_classes[c])
+          all_F12[[m]][c] = measures::F1(yhats_cut2[names(yhats_cut2)==methods[m]][[1]], Yc, all_classes[c])
+          all_PPV1[[m]][c] = measures::PPV(yhats_cut[names(yhats_cut)==methods[m]][[1]], Yc, all_classes[c])
+          all_PPV2[[m]][c] = measures::PPV(yhats_cut2[names(yhats_cut2)==methods[m]][[1]], Yc, all_classes[c])
+        }
+      }
 
-    br1 = lapply(prhats, function(x){measures::Brier(x,c(Ys$test$Y), min(Ys$test$Y), max(Ys$test$Y))})
-    br2 = lapply(prhats, function(x){measures::Brier(x,c(Ys$test$Y), min(Ys$test$Y), max(Ys$test$Y))})  ### BINARY ONLY
+      AUC = lapply(all_AUC,function(x){mean(x,na.rm=T)}); AUC2 = lapply(all_AUC2,function(x){mean(x,na.rm=T)}); br1 = lapply(all_br1,function(x){mean(x,na.rm=T)}); br2 = lapply(all_br2,function(x){mean(x,na.rm=T)})
+      TPR1 = lapply(all_TPR1,function(x){mean(x,na.rm=T)}); TPR2 = lapply(all_TPR2,function(x){mean(x,na.rm=T)}); FPR1 = lapply(all_FPR1,function(x){mean(x,na.rm=T)}); FPR2 = lapply(all_FPR2,function(x){mean(x,na.rm=T)})
+      F11 = lapply(all_F11,function(x){mean(x,na.rm=T)}); F12 = lapply(all_F12,function(x){mean(x,na.rm=T)}); PPV1 = lapply(all_PPV1,function(x){mean(x,na.rm=T)}); PPV2 = lapply(all_PPV2,function(x){mean(x,na.rm=T)})
+    }
+    ARI1 = lapply(yhats,function(x){as.numeric(mclust::adjustedRandIndex(c(Ys$test$Y), c(x)))})
+    ARI2 = lapply(yhats2,function(x){as.numeric(mclust::adjustedRandIndex(c(Ys$test$Y), c(x)))})
+
+    kappa1 = lapply(yhats, function(x){measures::KAPPA(c(Ys$test$Y), c(x))})
+    kappa2 = lapply(yhats2, function(x){measures::KAPPA(c(Ys$test$Y), c(x))})
+
+    factors_y = levels(factor(c(Ys$test$Y)))
+    mcc1 = lapply(yhats, function(x){yardstick::mcc_vec(truth=factor(c(Ys$test$Y),levels=factors_y), estimate=factor(c(x),levels=factors_y))})
+    mcc2 = lapply(yhats2, function(x){yardstick::mcc_vec(truth=factor(c(Ys$test$Y),levels=factors_y), estimate=factor(c(x),levels=factors_y))})
     if(grepl("SIM",dataset)){
       p = lapply(prhats,function(x){abs(x - c(prs$test)[[1]])})
       p2 = lapply(prhats2,function(x){abs(x - c(prs$test)[[1]])})    ### CAT ONLY
       res = list(imp=list(L1s=L1s),
                  inf=list(df=df),
-                 pred=list(all_complete=prhats, all_imputed=prhats2, complete=p, imputed=p2, AUC_complete=AUC, AUC_imputed=AUC2,
-                           truth=prs, Briers1=br1, Briers2=br2))     # output: imputation, inference, prediction
+                 pred=list(all_complete=prhats, all_imputed=prhats2, complete=p, imputed=p2,
+                           all_AUC_complete=all_AUC, all_AUC_imputed=all_AUC2,
+                           all_TPR_complete=all_TPR1, all_TPR_imputed=all_TPR2,
+                           all_FPR_complete=all_FPR1, all_FPR_imputed=all_FPR2,
+                           all_F1_complete=all_F11, all_F1_imputed=all_F12,
+                           AUC_complete=AUC,AUC_imputed=AUC2,
+                           TPR_complete=TPR1, TPR_imputed=TPR2,
+                           FPR_complete=FPR1, FPR_imputed=FPR2,
+                           F1_complete=F11, F1_imputed=F12,
+                           PPV_complete=PPV1, PPV_imputed=PPV2,
+                           truth=prs,
+                           all_Briers1=all_br1, all_Briers2=all_br2,
+                           Briers1=br1, Briers2=br2, ARI_complete=ARI1, ARI_imputed=ARI2,
+                           kappa1=kappa1, kappa2=kappa2, mcc1=mcc1, mcc2=mcc2))     # output: imputation, inference, prediction
     }else{
       res = list(imp=list(L1s=L1s),
                  inf=NA,
-                 pred=list(all_complete=prhats, all_imputed=prhats2, AUC_complete=AUC, AUC_imputed=AUC2, Briers1=br1, Briers2=br2))
+                 pred=list(all_complete=prhats, all_imputed=prhats2,all_AUC_complete=all_AUC, all_AUC_imputed=all_AUC2,
+                           AUC_complete=AUC,AUC_imputed=AUC2,all_Briers1=all_br1, all_Briers2=all_br2,
+                           all_TPR_complete=all_TPR1, all_TPR_imputed=all_TPR2,
+                           all_FPR_complete=all_FPR1, all_FPR_imputed=all_FPR2,
+                           all_F1_complete=all_F11, all_F1_imputed=all_F12,
+                           TPR_complete=TPR1, TPR_imputed=TPR2,
+                           FPR_complete=FPR1, FPR_imputed=FPR2,
+                           F1_complete=F11, F1_imputed=F12,
+                           PPV_complete=PPV1, PPV_imputed=PPV2,
+                           Briers1=br1, Briers2=br2, ARI_complete=ARI1, ARI_imputed=ARI2,
+                           kappa1=kappa1, kappa2=kappa2, mcc1=mcc1, mcc2=mcc2))
     }
   } else{
-    yhats = asplit(yhats,2)
-    yhats2 = asplit(yhats2,2)
+
     L1_y = lapply(yhats, function(x){abs(x - Ys$test$Y)})
     L1_y2 = lapply(yhats2, function(x){abs(x - Ys$test$Y)})
     if(grepl("SIM",dataset)){

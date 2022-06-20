@@ -33,6 +33,8 @@ inv_logit = function(x){
 #'
 #' @importFrom MASS mvrnorm
 #' @importFrom qrnn elu
+#' @importFrom xlsx read.xlsx
+#' @import mlbench
 #'
 #' @export
 simulateData = function(dataset = "SIM", N, D, P, data_types_x, family, seed, NL_x, NL_y,
@@ -48,11 +50,12 @@ simulateData = function(dataset = "SIM", N, D, P, data_types_x, family, seed, NL
   softmax <- function (x) {
     exp(x - logsumexp(x))
   }
+  print(dataset)
 
   if(dataset=="HEPMASS"){ # 7M x 27 --> 300K x 21 feats
     # temp <- tempfile()
-    f1 = sprintf("./Results_%s/1000_train.csv.gz",dataset)
-    f2 = sprintf("./Results_%s/1000_test.csv.gz",dataset)
+    f1 = sprintf("./data/%s/1000_train.csv.gz",dataset)
+    f2 = sprintf("./data/%s/1000_test.csv.gz",dataset)
     if(!file.exists(f1)){ download.file("https://archive.ics.uci.edu/ml/machine-learning-databases/00347/1000_train.csv.gz", destfile=f1) }
     if(!file.exists(f2)){ download.file("https://archive.ics.uci.edu/ml/machine-learning-databases/00347/1000_test.csv.gz", destfile=f2) }
     data1 <- read.csv(gzfile(f1),header=F,skip=1, nrows=700000)
@@ -137,19 +140,62 @@ simulateData = function(dataset = "SIM", N, D, P, data_types_x, family, seed, NL
     data=data[,-ncol(data)] # take out class (10)
     params=NULL
     X=data; Y=classes
-  } else if(dataset=="CONCRETE"){ # 1030 x 8
-    require(RCurl);require(gdata)
-    data <- read.xls("http://archive.ics.uci.edu/ml/machine-learning-databases/concrete/compressive/Concrete_Data.xls")
-    classes=data[,ncol(data)]
-    data=data[,-ncol(data)] # take out class: here it's continuous
-    params=NULL
-    X=data; Y=classes
   } else if(dataset=="BANKNOTE"){ # 1372 x 4
     data <- read.csv(url("https://archive.ics.uci.edu/ml/machine-learning-databases/00267/data_banknote_authentication.txt"),header=FALSE)
     classes=data[,ncol(data)]
     data=data[,-ncol(data)] # take out class (2)
     params=NULL
     X=data; Y=classes
+  }  else if(dataset=="SHUTTLE"){   # 14442 x 9
+    # data <- read.table(url("https://archive.ics.uci.edu/ml/machine-learning-databases/statlog/shuttle/shuttle.tst"),header=FALSE, sep=" ")
+    data(Shuttle)
+    data = Shuttle
+    data = data[data$Class %in% c("Rad.Flow","High","Bypass"),]  # remove classes 2, 3, 6, 7: with 50, 171, 10 ,13 observations only
+    data$Class = as.numeric(as.factor(data$Class))
+    classes=data[,ncol(data)]
+    data=data[,-ncol(data)]
+    params=NULL
+    X=data; Y=classes   # 3 classes
+  } else if(dataset=="LETTER"){   # 20000 x 16
+    data <- read.table(url("https://archive.ics.uci.edu/ml/machine-learning-databases/letter-recognition/letter-recognition.data"),header=FALSE, sep=",")
+    colnames(data) = c("lettr","x-box","y-box","width","high",
+                       "onpix","x-bar","y-bar","x2bar","y2bar",
+                       "xybar","x2ybr","xy2br","x-ege","xegvy",
+                       "y-ege","yegvx")
+    classes=data[,1]
+    data = data[,-1]
+    params=NULL
+    X=data; Y=classes   # 26 classes (letters)
+  } else if(dataset=="DRYBEAN"){   # 13611 x 16
+    data = read.csv("./data/DryBeanDataset/Dry_Bean_Dataset.csv")
+    classes=data[,ncol(data)]
+    data=data[,-ncol(data)]
+    params=NULL
+    X=data; Y=classes   # 7 classes
+  } else if(dataset=="CAREVALUATION"){  # 1728 x 6
+    data <- read.table(url("https://archive.ics.uci.edu/ml/machine-learning-databases/car/car.data"),header=FALSE, sep=",")
+    for(c in 1:ncol(data)){
+      data[,c] = as.numeric(as.factor(data[,c]))
+    }
+    colnames(data) = c("buying","maint","doors","persons","lug_boot","safety","class")
+    classes=data[,ncol(data)]
+    data=data[,-ncol(data)]
+    params=NULL
+    X=data; Y=classes   # categorical 4 classes
+  } else if(dataset=="RAISIN"){   # 900 x 7
+    data = xlsx::read.xlsx("./data/Raisin_Dataset/Raisin_Dataset.xlsx",sheetIndex = 1)
+    classes=data[,ncol(data)]
+    data=data[,-ncol(data)]
+    params=NULL
+    X=data; Y=classes   # categorical 2 classes
+  } else if(dataset=="ABALONE"){   # 4177 x 8
+    data <- read.table(url("https://archive.ics.uci.edu/ml/machine-learning-databases/abalone/abalone.data"),header=FALSE, sep=",")
+    colnames(data)=c("sex","length","diameter","height","wholeweight","shuckedweight","visceraweight","shellweight","rings")
+    data[,1] = as.numeric(as.factor(data[,1]))  # gender: female, male, or infant
+    classes=data[,ncol(data)]
+    data=data[,-ncol(data)]
+    params=NULL
+    X=data; Y=classes   # categorical
   } else if(grepl("SIM",dataset)){
 
     X = matrix(nrow=N, ncol=P)
@@ -370,8 +416,13 @@ simulateData = function(dataset = "SIM", N, D, P, data_types_x, family, seed, NL
 
       betas_cat = matrix(sample(c(-2*beta, 2*beta), P_cat*(Cy-1), replace=T), nrow=P_cat, ncol=Cy-1)
       betas = cbind(beta1, rbind(betas_real, betas_cat, betas_count))
-      epsilon = matrix(rnorm(N*(Cy-1), 0, 0.1), nrow=N,ncol=Cy)
 
+      # select_betas = sample(c(1,0),P,replace=T,prob=c(0.5,0.5))
+      select_betas = 1
+      betas[,-1] = betas[,-1] * select_betas       # select 20% of betas to be nonzero (larger coefs)
+      print(betas)
+
+      epsilon = matrix(rnorm(N*(Cy-1), 0, 0.1), nrow=N,ncol=Cy)
 
       betas2_real = matrix(sample(c(-1*beta, beta), P_real*(Cy-1), replace=T),nrow=P_real,ncol=Cy-1)
       betas2_count = matrix(sample(c(-1*beta, beta), P_count*(Cy-1), replace=T),nrow=P_count,ncol=Cy-1)      # effect is twice the magnitude of the effect of continuous values?
