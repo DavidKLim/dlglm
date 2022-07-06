@@ -75,6 +75,26 @@ simulateData = function(dataset = "SIM", N, D, P, data_types_x, family, seed, NL
     params=NULL
 
     X=data; Y=classes
+  }else if(dataset=="BANKMARKETING"){
+
+    data = read.csv("./data/bank-additional/bank-additional-full.csv",sep=";")
+    classes=data[,ncol(data)]
+    data=data[,-ncol(data)]
+    params=NULL
+    X = data
+
+    # View(X)
+    for(c in c(2:10,15)){
+      X[,c] = as.numeric(as.factor(X[,c]))
+      X[X[,c]%in% c("unknown","nonexistent"),c]=NA
+    }
+    X[X[,13]==999,13]=NA
+
+    # col 16 --> 999 is unknown
+    X = X[,-c(8:11)]  # got rid of month/day called (probably not useful) and duration (too correlated with response)
+
+    Y=classes   # categorical
+
   }else if(dataset=="SPAM"){  # 4601 x 57
     data <- read.csv(url("https://archive.ics.uci.edu/ml/machine-learning-databases/spambase/spambase.data"),header=FALSE)
     colnames(data)=c(paste("word",c(1:48),sep=""),paste("char",c(1:6),sep=""),"capital_run_length_average",
@@ -680,7 +700,7 @@ prepareData = function(dataset = "SIM", data.file.name = NULL, mask.file.name=NU
       P=sim.params$P; N=sim.params$N
       if(all(is.na(sim.params$data_types_x))){sim.params$data_types_x = rep("real",sim.params$P)}
       dataset = sprintf("Xr%dct%dcat%d_beta%f_pi%d/SIM_N%d_P%d_D%d",sum(sim.params$data_types_x=="real"),
-                        sum(sim.params$data_types_x=="count"),sum(sim.params$data_types_x=="cat"), params$beta, miss.params$pi*100,
+                        sum(sim.params$data_types_x=="count"),sum(sim.params$data_types_x=="cat"), sim.params$beta, miss.params$pi*100,
                         sim.params$N, sim.params$P, sim.params$D)
     }
     sim.data = simulateData(dataset=dataset, N=sim.params$N, D=sim.params$D, P=sim.params$P,
@@ -705,6 +725,17 @@ prepareData = function(dataset = "SIM", data.file.name = NULL, mask.file.name=NU
     load(mask.file.name)
     phis=NULL; miss_cols=NULL; ref_cols=NULL
     mechanism = NA; pi=NA
+  } else if(dataset=="BANKMARKETING"){
+    Missing = 1 - (is.na(X)^2)
+    mask_x = Missing
+    mask_y = 1-is.na(Y)^2
+
+    ## original split
+    # g = c( rep("train",nrow(d1)), rep("valid",nrow(d2)), rep("test",nrow(d3)) )
+
+    # ## 8-1-1 split
+    # ratios = c(0.8, 0.1, 0.1)
+    # names(ratios) = c("train","valid","test")
   }else{
     mechanism = miss.params$mechanism; pi = miss.params$pi
     set.seed( sim.params$sim_index*9 )
