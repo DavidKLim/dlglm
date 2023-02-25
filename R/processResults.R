@@ -62,7 +62,7 @@ processResults = function(dataset="SIM",prefix="",data.file.name = NULL, mask.fi
   mechanism=miss.params$mechanism
   sim_index=sim.params$sim_index
 
-  iNL_r=""
+  iNL_r = if(NL_r){"NL_"}else{""}
   if(grepl("SIM",dataset)){
     iNL_x = if(NL_x){"NL"}else{""}
     iNL_y = if(NL_y){"NL"}else{""}
